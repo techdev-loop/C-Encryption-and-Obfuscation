@@ -1,0 +1,5 @@
+// Polymorphic stub - auto-generated. Hash/size varies per build.
+#include <cstdint>
+namespace catclicker { namespace poly {
+    [[maybe_unused]] constexpr uint8_t pad[@PAD_SIZE@] = { @PAD_DATA@ };
+}}
