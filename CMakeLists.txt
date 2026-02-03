@@ -10,6 +10,9 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
+# License / HWID binding and anti-debug (optional; ON for release)
+option(CATCLICKER_ENABLE_LICENSE "Enable license validation, HWID binding, and anti-debug" ON)
+
 set(CMAKE_CXX_FLAGS_RELEASE "/O2 /Ob2 /DNDEBUG /GL /Oi /Ot /Gy")
 set(CMAKE_CUDA_FLAGS_RELEASE "-O3 --use_fast_math")
 set(CMAKE_CUDA_ARCHITECTURES 86)
@@ -87,13 +90,14 @@ set(SOURCES
     src/main.cpp src/frame_grabber.cpp src/inference_engine.cpp src/mouse_controller.cpp
     src/input_tracker.cpp src/target_selector.cpp src/target_predictor.cpp
     src/gpu_preprocessor.cu src/priority_manager.cpp src/gui.cpp
-    src/auth.cpp src/antidebug.cpp src/stealth.cpp ${IMGUI_SOURCES})
+    src/hwid.cpp src/license_client.cpp src/antidebug.cpp
+    ${IMGUI_SOURCES})
 
 set(HEADERS
     include/frame_grabber.h include/inference_engine.h include/mouse_controller.h
     include/input_tracker.h include/target_selector.h include/target_predictor.h
     include/gpu_preprocessor.h include/priority_manager.h include/config.h
-    include/common.h include/gui.h include/auth.h include/antidebug.h include/stealth.h include/obfuscate.h)
+    include/common.h include/gui.h include/hwid.h include/license_client.h include/antidebug.h include/obfuscate.h)
 
 add_executable(cat_clicker ${SOURCES} ${HEADERS})
 
@@ -106,22 +110,14 @@ if(HIDAPI_FOUND)
     target_compile_definitions(cat_clicker PRIVATE HIDAPI_AVAILABLE)
 endif()
 
-# Polymorphic + obfuscation key (varies per build)
-include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/Polymorphic.cmake)
-add_polymorphic_stub(cat_clicker)
-string(TIMESTAMP OBF_KEY "%s" UTC)
-math(EXPR OBF_KEY_VAL "(${OBF_KEY} % 200) + 40")
-target_compile_definitions(cat_clicker PRIVATE OBFUSCATE_KEY=${OBF_KEY_VAL})
-
-# Auth server URL: -DAUTH_SERVER_URL="https://yourserver.com/auth" or leave empty
-if(DEFINED AUTH_SERVER_URL AND NOT AUTH_SERVER_URL STREQUAL "")
-    target_compile_definitions(cat_clicker PRIVATE AUTH_SERVER_URL="${AUTH_SERVER_URL}")
-endif()
-
 target_link_libraries(cat_clicker PRIVATE
     ${OpenCV_LIBS} CUDA::cudart CUDA::cuda_driver
     ${NVINFER_LIB} ${NVINFER_PLUGIN_LIB} ${NVONNXPARSER_LIB}
-    d3d11 dxgi user32 kernel32 dwmapi winhttp iphlpapi ntdll)
+    d3d11 dxgi user32 kernel32 dwmapi winhttp)
+
+if(CATCLICKER_ENABLE_LICENSE)
+    target_compile_definitions(cat_clicker PRIVATE CATCLICKER_ENABLE_LICENSE)
+endif()
 
 if(HIDAPI_FOUND)
     target_link_libraries(cat_clicker PRIVATE ${HIDAPI_LIBRARY})

@@ -1,7 +1,6 @@
 #pragma once
 
 #include <cstdint>
-#include <string>
 
 namespace catclicker {
 namespace config {
@@ -105,13 +104,6 @@ constexpr int THREAD_PRIORITY_LOW = THREAD_PRIORITY_LOWEST;
 // ============== Debug ==============
 constexpr bool DEFAULT_DEBUG_WINDOW = false;
 
-// ============== Auth & Security ==============
-// Set AUTH_URL to your server e.g. "https://yourserver.com/auth". Empty = no auth (dev)
-#ifndef AUTH_SERVER_URL
-#define AUTH_SERVER_URL ""
-#endif
-constexpr bool DEFAULT_HIDE_FROM_TASKMANAGER = false;
-
 } // namespace config
 
 // Runtime configuration (can be modified)
@@ -165,10 +157,6 @@ struct RuntimeConfig {
     // Legacy compatibility (maps to auto_click_mode)
     bool auto_click_enabled = false;
     int auto_click_toggle_key = config::DEFAULT_AUTO_CLICK_KEY;
-    
-    // Security
-    std::string auth_server_url;
-    bool hide_from_taskmanager = config::DEFAULT_HIDE_FROM_TASKMANAGER;
 };
 
 } // namespace catclicker

@@ -5,14 +5,15 @@
 namespace catclicker {
 namespace antidebug {
 
-// Run all anti-debug checks. Returns true if debugger/tampering detected.
+// Call once at startup and periodically (e.g. every 30s) from a low-priority thread.
+// Returns true if a debugger or memory-inspection tool is detected.
 bool is_debugger_present();
 
-// Call this at startup and periodically. Exits process if debugger detected.
-void enforce_no_debugger();
+// Optional: call from a background thread every interval_seconds. Exits process if detected.
+void start_periodic_check(uint32_t interval_seconds);
 
-// Start background thread that periodically checks (every ~500ms)
-void start_anti_debug_monitor();
+// Stop the periodic check thread (call before shutdown).
+void stop_periodic_check();
 
 } // namespace antidebug
 } // namespace catclicker

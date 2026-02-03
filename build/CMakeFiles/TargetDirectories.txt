@@ -1,0 +1,3 @@
+C:/aobfuscatedcatclicker/build/CMakeFiles/cat_clicker.dir
+C:/aobfuscatedcatclicker/build/CMakeFiles/ALL_BUILD.dir
+C:/aobfuscatedcatclicker/build/CMakeFiles/ZERO_CHECK.dir

@@ -2,90 +2,159 @@
 #include "common.h"
 #include <windows.h>
 #include <winternl.h>
-#include <thread>
+#include <tlhelp32.h>
+#include <string>
 #include <atomic>
+#include <thread>
+#include <chrono>
 
-#pragma comment(lib, "ntdll.lib")
-
-extern "C" {
-    NTSTATUS NTAPI NtQueryInformationProcess(HANDLE, ULONG, PVOID, ULONG, PULONG);
-}
-
-#ifndef ProcessDebugPort
-#define ProcessDebugPort 7
-#endif
-#ifndef ProcessDebugObjectHandle
-#define ProcessDebugObjectHandle 30
-#endif
-#ifndef ProcessDebugFlags
-#define ProcessDebugFlags 31
-#endif
+// NtQueryInformationProcess loaded via GetProcAddress(ntdll) - no lib link needed
 
 namespace catclicker {
 namespace antidebug {
 
-static std::atomic<bool> g_monitor_running{false};
+namespace {
 
-bool is_debugger_present() {
-    // 1. IsDebuggerPresent (PEB)
-    if (IsDebuggerPresent()) return true;
-    
-    // 2. CheckRemoteDebuggerPresent
+typedef NTSTATUS(NTAPI* NtQueryInformationProcess_t)(
+    HANDLE ProcessHandle, ULONG ProcessInformationClass,
+    PVOID ProcessInformation, ULONG ProcessInformationLength, PULONG ReturnLength);
+
+#define ProcessDebugPort 7
+#define ProcessDebugObjectHandle 30
+#define ProcessDebugFlags 31
+
+static std::atomic<bool> g_periodic_stop{false};
+static std::thread g_periodic_thread;
+
+bool check_is_debugger_present() {
+    return IsDebuggerPresent() != 0;
+}
+
+bool check_remote_debugger() {
     BOOL remote = FALSE;
-    if (CheckRemoteDebuggerPresent(GetCurrentProcess(), &remote) && remote)
-        return true;
-    
-    // 3. NtQueryInformationProcess - DebugPort
+    return CheckRemoteDebuggerPresent(GetCurrentProcess(), &remote) && remote;
+}
+
+bool check_nt_debug_port() {
+    HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    if (!ntdll) return false;
+    auto NtQIP = (NtQueryInformationProcess_t)GetProcAddress(ntdll, "NtQueryInformationProcess");
+    if (!NtQIP) return false;
     DWORD_PTR debug_port = 0;
-    if (NtQueryInformationProcess(GetCurrentProcess(), ProcessDebugPort,
-            &debug_port, sizeof(debug_port), nullptr) == 0 && debug_port != 0)
-        return true;
-    
-    // 4. NtQueryInformationProcess - DebugObjectHandle
-    HANDLE debug_obj = nullptr;
-    if (NtQueryInformationProcess(GetCurrentProcess(), ProcessDebugObjectHandle,
-            &debug_obj, sizeof(debug_obj), nullptr) == 0 && debug_obj != nullptr) {
-        CloseHandle(debug_obj);
-        return true;
+    NTSTATUS st = NtQIP(GetCurrentProcess(), ProcessDebugPort, &debug_port, sizeof(debug_port), nullptr);
+    if (st != 0) return false;
+    return debug_port != 0;
+}
+
+bool check_nt_debug_object() {
+    HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    if (!ntdll) return false;
+    auto NtQIP = (NtQueryInformationProcess_t)GetProcAddress(ntdll, "NtQueryInformationProcess");
+    if (!NtQIP) return false;
+    DWORD_PTR handle = 0;
+    NTSTATUS st = NtQIP(GetCurrentProcess(), ProcessDebugObjectHandle, &handle, sizeof(handle), nullptr);
+    if (st != 0) return false;
+    return handle != 0;
+}
+
+bool check_nt_debug_flags() {
+    HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    if (!ntdll) return false;
+    auto NtQIP = (NtQueryInformationProcess_t)GetProcAddress(ntdll, "NtQueryInformationProcess");
+    if (!NtQIP) return false;
+    DWORD_PTR flags = 0;
+    NTSTATUS st = NtQIP(GetCurrentProcess(), ProcessDebugFlags, &flags, sizeof(flags), nullptr);
+    if (st != 0) return false;
+    return flags == 0; // 0 means being debugged
+}
+
+bool check_debugger_windows() {
+    const wchar_t* titles[] = {
+        L"x64dbg", L"x32dbg", L"WinDbg", L"OllyDbg", L"IDA", L"Cheat Engine",
+        L"Process Hacker", L"Process Explorer", L"API Monitor", L"Immunity",
+        L"dnSpy", L"de4dot", L"x64dbg -", L"IDA -", L"Cheat Engine 7"
+    };
+    for (const wchar_t* t : titles) {
+        if (FindWindowW(nullptr, t) != nullptr)
+            return true;
     }
-    
-    // 5. NtQueryInformationProcess - DebugFlags (NoDebugInherit)
-    DWORD debug_flags = 0;
-    if (NtQueryInformationProcess(GetCurrentProcess(), ProcessDebugFlags,
-            &debug_flags, sizeof(debug_flags), nullptr) == 0 && debug_flags == 0)
-        return true;  // 0 means being debugged
-    
-    // 6. Timing check - debugger single-stepping is slow
-    LARGE_INTEGER freq, t1, t2;
-    QueryPerformanceFrequency(&freq);
-    QueryPerformanceCounter(&t1);
-    volatile int x = 0;
-    for (int i = 0; i < 10; i++) x += i;
-    QueryPerformanceCounter(&t2);
-    double elapsed = (double)(t2.QuadPart - t1.QuadPart) / freq.QuadPart * 1e6;
-    if (elapsed > 2000.0) return true;  // >2ms suggests single-stepping
-    
     return false;
 }
 
-void enforce_no_debugger() {
-    if (is_debugger_present()) {
-        ExitProcess(0xDEAD);
+bool check_debugger_processes() {
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return false;
+    PROCESSENTRY32W pe = { sizeof(pe) };
+    bool found = false;
+    if (Process32FirstW(snap, &pe)) {
+        do {
+            std::wstring name = pe.szExeFile;
+            for (auto& c : name) if (c >= L'A' && c <= L'Z') c += (L'a' - L'A');
+            if (name.find(L"x64dbg") != std::wstring::npos ||
+                name.find(L"x32dbg") != std::wstring::npos ||
+                name.find(L"windbg") != std::wstring::npos ||
+                name.find(L"ollydbg") != std::wstring::npos ||
+                name.find(L"ida") != std::wstring::npos ||
+                name.find(L"cheatengine") != std::wstring::npos ||
+                name.find(L"procmon") != std::wstring::npos ||
+                name.find(L"procexp") != std::wstring::npos ||
+                name.find(L"dnspy") != std::wstring::npos ||
+                name.find(L"de4dot") != std::wstring::npos) {
+                found = true;
+                break;
+            }
+        } while (Process32NextW(snap, &pe));
+    }
+    CloseHandle(snap);
+    return found;
+}
+
+// Simple timing check: two quick operations; if elapsed is too large, likely single-stepping
+bool check_timing() {
+    LARGE_INTEGER freq, start, end;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&start);
+    volatile int x = 0;
+    for (int i = 0; i < 10; ++i) x += i;
+    QueryPerformanceCounter(&end);
+    double elapsed_us = 1e6 * (end.QuadPart - start.QuadPart) / (double)freq.QuadPart;
+    return elapsed_us > 1000.0; // > 1 ms for trivial loop is suspicious
+}
+
+} // namespace
+
+bool is_debugger_present() {
+    if (check_is_debugger_present()) return true;
+    if (check_remote_debugger()) return true;
+    if (check_nt_debug_port()) return true;
+    if (check_nt_debug_object()) return true;
+    if (check_nt_debug_flags()) return true;
+    if (check_debugger_windows()) return true;
+    if (check_debugger_processes()) return true;
+    if (check_timing()) return true;
+    return false;
+}
+
+static void periodic_loop(uint32_t interval_seconds) {
+    while (!g_periodic_stop) {
+        std::this_thread::sleep_for(std::chrono::seconds(interval_seconds));
+        if (g_periodic_stop) break;
+        if (is_debugger_present())
+            ExitProcess(1);
     }
 }
 
-static void monitor_thread() {
-    while (g_monitor_running) {
-        if (is_debugger_present()) {
-            ExitProcess(0xDEAD);
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(400));
-    }
+void start_periodic_check(uint32_t interval_seconds) {
+    if (g_periodic_thread.joinable()) return;
+    g_periodic_stop = false;
+    g_periodic_thread = std::thread(periodic_loop, interval_seconds > 0 ? interval_seconds : 30);
 }
 
-void start_anti_debug_monitor() {
-    if (g_monitor_running.exchange(true)) return;
-    std::thread(monitor_thread).detach();
+void stop_periodic_check() {
+    g_periodic_stop = true;
+    if (g_periodic_thread.joinable()) {
+        g_periodic_thread.join();
+    }
 }
 
 } // namespace antidebug

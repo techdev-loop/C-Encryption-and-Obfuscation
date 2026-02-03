@@ -8,9 +8,10 @@
 #include "target_selector.h"
 #include "target_predictor.h"
 #include "gui.h"
-#include "auth.h"
+#include "hwid.h"
+#include "license_client.h"
 #include "antidebug.h"
-#include "stealth.h"
+#include "obfuscate.h"
 
 #include <opencv2/opencv.hpp>
 #include <iostream>
@@ -20,6 +21,7 @@
 #include <iomanip>
 #include <sstream>
 #include <thread>
+#include <string>
 
 using namespace catclicker;
 namespace fs = std::filesystem;
@@ -56,8 +58,6 @@ void print_help() {
     std::cout << "  --lookahead <ms>     Prediction lookahead (default: 16)\n";
     std::cout << "  --mouse-center       Use mouse position as tracking center (TPS mode)\n";
     std::cout << "  --smoothing <0-5>    Smoothing curve type (0=linear, 1=ease-out, etc)\n";
-    std::cout << "  --print-hwid         Print HWID for license registration\n";
-    std::cout << "  --auth <url>         Auth server URL (overrides build default)\n";
 }
 
 // Auto-click state machine
@@ -115,39 +115,50 @@ struct AutoClickState {
     }
 };
 
+#if defined(CATCLICKER_ENABLE_LICENSE)
+static bool run_license_checks(int argc, char* argv[]) {
+    using namespace catclicker;
+    if (antidebug::is_debugger_present()) {
+        console::log_error(OBF("Debugger or analysis tool detected. Application cannot run.").decrypt());
+        return false;
+    }
+    std::string auth_url = OBF("https://auth.example.com").decrypt();
+    license::set_auth_base_url(auth_url);
+    std::string hwid_str = hwid::get_hwid();
+    if (hwid_str.empty()) {
+        console::log_error(OBF("Could not generate hardware ID. Cannot verify license.").decrypt());
+        return false;
+    }
+    std::string ip_str;
+    license::LicenseResult result = license::validate_session(hwid_str, ip_str);
+    if (result.need_login && !result.success) {
+        std::string email, password;
+        std::cout << OBF("Log in to continue (email and password):\n").decrypt();
+        std::cout << "Email: "; std::getline(std::cin, email);
+        std::cout << "Password: "; std::getline(std::cin, password);
+        result = license::login_and_bind(email, password, hwid_str, ip_str);
+        if (!result.success) {
+            console::log_error(result.error_message.empty() ? OBF("Login failed.").decrypt() : result.error_message);
+            return false;
+        }
+    } else if (!result.success) {
+        console::log_error(result.error_message.empty() ? OBF("License validation failed.").decrypt() : result.error_message);
+        return false;
+    }
+    antidebug::start_periodic_check(30);
+    return true;
+}
+#endif
+
 int main(int argc, char* argv[]) {
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
-    
-    for (int i = 1; i < argc; i++) {
-        if (std::string(argv[i]) == "--print-hwid") {
-            std::cout << "HWID: " << auth::get_hwid() << "\n";
-            return 0;
-        }
-    }
-    
-    antidebug::enforce_no_debugger();
-    antidebug::start_anti_debug_monitor();
-    
-    std::string auth_url;
-#ifdef AUTH_SERVER_URL
-    auth_url = AUTH_SERVER_URL;
-#endif
-    for (int i = 1; i + 1 < argc; i++) {
-        std::string arg = argv[i];
-        if ((arg == "--auth" || arg == "-a") && argv[i + 1]) {
-            auth_url = argv[i + 1];
-            break;
-        }
-    }
-    if (!auth_url.empty() && !auth::authenticate(auth_url)) {
-        console::log_error("Access denied. HWID/IP not authorized.");
+
+#if defined(CATCLICKER_ENABLE_LICENSE)
+    if (!run_license_checks(argc, argv))
         return 1;
-    }
-    
-    stealth::init_stealth(false);  // Set true to enable task manager title change
-    stealth::hide_from_task_manager();
-    
+#endif
+
     print_banner();
     
     RuntimeConfig cfg;
@@ -452,7 +463,11 @@ int main(int argc, char* argv[]) {
     mouse.disconnect();
     if (cfg.debug_window) cv::destroyAllWindows();
     priority_mgr.cleanup();
-    
+
+#if defined(CATCLICKER_ENABLE_LICENSE)
+    catclicker::antidebug::stop_periodic_check();
+#endif
+
     console::log_ok("Done.");
     return 0;
 }
